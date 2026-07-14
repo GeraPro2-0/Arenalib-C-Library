@@ -123,7 +123,21 @@ typedef struct arenalib_id_t {
     uint16_t generation;
 } arenalib_id_t;
 
+/* Portable invalid ID provider: prefer function over compound-literal macro
+ * to avoid C++ pedantic warnings about compound literals. */
+ARENALIB_INLINE arenalib_id_t arenalib_invalid_id(void) {
+    arenalib_id_t id;
+    id.index = 0xFFFFFFFFu;
+    id.generation = (uint16_t)0xFFFFu;
+    return id;
+}
+
+/* Backwards-compatible macro: in C use a compound literal, in C++ call the inline function */
+#ifndef __cplusplus
 #define ARENALIB_INVALID_ID (arenalib_id_t){0xFFFFFFFF, 0xFFFF}
+#else
+#define ARENALIB_INVALID_ID arenalib_invalid_id()
+#endif
 
 /* Static Pool Configuration */
 #ifndef ARENALIB_POOL_BLOCKS
@@ -133,9 +147,6 @@ typedef struct arenalib_id_t {
     #define ARENALIB_POOL_BLOCK_SIZE 1048576
 #endif
 
-/* ✅ Código Corregido */
-
-// 1. Primero definimos la estructura por completo
 typedef struct arenalib_arena_t {
     arenalib_size_t capacity;
     arenalib_size_t used;
@@ -157,9 +168,8 @@ typedef struct arenalib_arena_t {
     int pool_index;
 } arenalib_arena_t;
 
-// 2. Ahora que el compilador ya sabe cuánto mide, declaramos la unión y el pool estático
 typedef union {
-    arenalib_arena_t dummy_alignment; //  Ahora sí compila perfectamente
+    arenalib_arena_t dummy_alignment;
     unsigned char storage[ARENALIB_POOL_BLOCK_SIZE];
 } arenalib_pool_block_t;
 
@@ -410,10 +420,19 @@ ARENALIB_INLINE void arenalib_arena_free(arenalib_arena_t *arena, void *ptr, are
         return;
     }
 
-    unsigned char *expected = arena->data + (arena->used - arena->last_size);
-    if ((unsigned char *)ptr == expected && arenalib_align_up(size, ARENALIB_DEFAULT_ALIGNMENT) == arena->last_size) {
-        arena->used -= arena->last_size;
-        arena->last_size = 0;
+    arenalib_size_t aligned_size = arenalib_align_up(size, ARENALIB_DEFAULT_ALIGNMENT);
+    arenalib_arena_t *current = arena;
+
+    while (current != NULL) {
+        if (current->last_size == aligned_size) {
+            unsigned char *expected = current->data + (current->used - current->last_size);
+            if ((unsigned char *)ptr == expected) {
+                current->used -= current->last_size;
+                current->last_size = 0;
+                return;
+            }
+        }
+        current = current->next;
     }
 }
 
@@ -464,7 +483,11 @@ ARENALIB_INLINE void arenalib_arena_destroy(arenalib_arena_t *arena) {
         
         if (idx >= 0 && idx < ARENALIB_POOL_BLOCKS) {
             uint64_t mask = ~((uint64_t)1 << idx);
+#if ARENALIB_HAS_ATOMICS || defined(__GNUC__) || defined(__clang__)
             __atomic_and_fetch(&g_pool_bitmap, mask, __ATOMIC_SEQ_CST);
+#else
+            g_pool_bitmap &= mask;
+#endif
         }
         current = next_block;
     }
@@ -535,11 +558,11 @@ ARENALIB_INLINE void arenalib_arena_release_marker(arenalib_arena_t *arena, aren
 /* Allocates memory and returns a unique ID instead of a raw pointer */
 ARENALIB_INLINE arenalib_id_t arenalib_arena_alloc_id(arenalib_arena_t *arena, arenalib_size_t size) {
     if (!arena || !arena->offsets || arena->free_head == 0xFFFFFFFF) {
-        return ARENALIB_INVALID_ID;
+        return arenalib_invalid_id();
     }
 
     void *ptr = arenalib_arena_malloc_align(arena, size, ARENALIB_DEFAULT_ALIGNMENT);
-    if (!ptr) return ARENALIB_INVALID_ID;
+    if (!ptr) return arenalib_invalid_id();
     
     uint32_t slot = arena->free_head;
     
